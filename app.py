@@ -80,23 +80,43 @@ def check_password():
 def _client():
     return anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 
+def _candidatos_url(u):
+    u = u.strip().strip("/").replace(" ", "")
+    u = re.sub(r"^https?://", "", u, flags=re.I)      # quita protocolo si lo puso
+    u = re.sub(r"^www\.", "", u, flags=re.I)          # quita www
+    if "." in u:                                       # ya trae dominio (empresa.com)
+        base = [u]
+    else:                                              # solo el nombre → probamos dominios
+        base = [u + ".com", u + ".es", u + ".io", u + ".net"]
+    out = []
+    for b in base:
+        out += ["https://" + b, "https://www." + b]
+    return out
+
 def resumir_empresa(url):
     if not url.strip():
         return ""
-    u = url.strip()
-    if not u.startswith("http"): u = "https://" + u
-    try:
-        r = requests.get(u, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
-        texto = re.sub(r"<script.*?</script>|<style.*?</style>", " ", r.text, flags=re.S)
-        texto = re.sub(r"<[^>]+>", " ", texto)
-        texto = re.sub(r"\s+", " ", texto).strip()[:3500]
-    except Exception as e:
-        return f"(No pude acceder a la web: {e})"
+    texto = ""; usada = ""
+    for cand in _candidatos_url(url):
+        try:
+            r = requests.get(cand, timeout=12, headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=True)
+            if r.status_code < 400 and r.text:
+                t = re.sub(r"<script.*?</script>|<style.*?</style>", " ", r.text, flags=re.S)
+                t = re.sub(r"<[^>]+>", " ", t)
+                t = re.sub(r"\s+", " ", t).strip()
+                if len(t) > 120:
+                    texto = t[:3500]; usada = cand; break
+        except Exception:
+            continue
+    if not texto:
+        return ("(No pude acceder a la web. Revisa el enlace: pon la dirección completa, "
+                "por ejemplo https://www.alimerka.es)")
     msg = _client().messages.create(model=MODEL, max_tokens=350,
         system=("Resume en 2-3 frases qué hace esta empresa a partir del texto de su web: sector, actividad y tamaño "
                 "si se deduce. Español de España, sobrio, sin inventar. Solo el resumen."),
         messages=[{"role": "user", "content": texto}])
-    return "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text").strip()
+    resumen = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text").strip()
+    return resumen
 
 QUIENES = ("En Tessera acompañamos a compañías en su crecimiento desde una visión integral de personas, negocio y "
     "estructura. Trabajamos como partners en la construcción de equipos y en la toma de decisiones importantes, "
@@ -216,15 +236,22 @@ MESES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","sept
 def _fecha_es(d):
     return f"{d.day} de {MESES[d.month-1]} de {d.year}" if d else ""
 
-def _lineas_inputs(titulo, n, kp, ph):
+def _lineas_inputs(titulo, kp, ph, ini=3):
     st.markdown(f"**{titulo}**")
-    st.caption("Una por casilla (no lo metas todo en la misma línea).")
+    st.caption("Una por casilla. Pulsa «Añadir» si necesitas más.")
+    n_key = f"{kp}_n"
+    if n_key not in st.session_state:
+        st.session_state[n_key] = ini
+    n = st.session_state[n_key]
     out = []
     for i in range(n):
         v = st.text_input(f"{kp}_{i}", key=f"{kp}_{i}", label_visibility="collapsed",
                           placeholder=f"{ph} {i+1}")
         if v.strip():
             out.append("• " + v.strip())
+    if st.button(f"➕ Añadir {ph.lower()}", key=f"{kp}_add"):
+        st.session_state[n_key] = n + 1
+        st.rerun()
     return "\n".join(out)
 
 BANDAS = ["18k","20k","22k","24k","26k","28k","30k","33k","36k","40k","45k","50k","55k","60k","70k","80k","90k","100k+"]
@@ -243,9 +270,31 @@ tipo_sel = st.segmented_control("Tipo de alta", ["Headhunting", "Outsourcing"],
 tipo = "headhunting" if (tipo_sel or "Headhunting") == "Headhunting" else "outsourcing"
 st.divider()
 
+def cargar_empresas():
+    p = ruta("empresas.txt")
+    if not os.path.exists(p):
+        return []
+    with open(p, encoding="utf-8") as f:
+        nombres = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
+    # únicas y ordenadas alfabéticamente (sin distinguir mayúsculas/acentos)
+    vistas, out = set(), []
+    for n in sorted(nombres, key=lambda s: s.lower()):
+        if n.lower() not in vistas:
+            vistas.add(n.lower()); out.append(n)
+    return out
+
 st.markdown("**Empresa y contacto**")
+_empresas = cargar_empresas()
 c1, c2 = st.columns(2)
-empresa = c1.text_input("Empresa", key="empresa")
+NUEVA = "➕ Añadir empresa nueva…"
+if _empresas:
+    sel_emp = c1.selectbox("Empresa (del roadmap)", _empresas + [NUEVA], key="empresa_sel")
+    if sel_emp == NUEVA:
+        empresa = c1.text_input("Nombre de la empresa nueva", key="empresa_nueva")
+    else:
+        empresa = sel_emp
+else:
+    empresa = c1.text_input("Empresa", key="empresa")
 sector = c2.text_input("Sector", key="sector")
 web = st.text_input("Web de la empresa (pega el enlace y pulsa el botón)", key="web", placeholder="https://…")
 if st.button("🔎 Traer info de la empresa desde la web", key="btn_web"):
@@ -264,8 +313,8 @@ sales_email = c4.text_input("Tu email (recibirás una copia)", key="sales_email"
 
 st.divider()
 titulo = st.text_input("Título del puesto o servicio", key="titulo")
-responsabilidades = _lineas_inputs("Misión y responsabilidades", 6, "resp", "Responsabilidad")
-requisitos = _lineas_inputs("Requisitos imprescindibles", 5, "req", "Requisito")
+responsabilidades = _lineas_inputs("Misión y responsabilidades", "resp", "Responsabilidad", ini=3)
+requisitos = _lineas_inputs("Requisitos imprescindibles", "req", "Requisito", ini=3)
 idiomas = st.text_input("Idiomas necesarios", key="idiomas", placeholder="Ej. Español nativo; inglés B2")
 
 data = {"tipo": tipo, "empresa": empresa, "sector": sector, "web": web,
