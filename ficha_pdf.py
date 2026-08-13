@@ -130,6 +130,7 @@ def generar_ficha(data: dict) -> bytes:
             ("Modalidad", data.get("modalidad","")),
             ("Días presenciales/semana", data.get("dias_presenciales","")),
             ("Ubicación de la oficina", data.get("ubicacion","")),
+            ("Horario de los empleados", data.get("horario","")),
         ], S, story)
         _section("EL PROCESO", [
             ("Fases de entrevista", data.get("fases","")),
@@ -155,7 +156,8 @@ def generar_ficha(data: dict) -> bytes:
             ("Posible incorporación a plantilla", data.get("incorporacion","")),
             ("Modalidad", data.get("modalidad","")),
             ("Días presenciales/semana", data.get("dias_presenciales","")),
-            ("Ubicación y horario", data.get("ubicacion","")),
+            ("Ubicación", data.get("ubicacion","")),
+            ("Horario de los empleados", data.get("horario","")),
             ("Equipo y accesos", data.get("accesos","")),
         ], S, story)
         _section("ORGANIZACIÓN DEL DÍA A DÍA", [

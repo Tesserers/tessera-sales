@@ -93,10 +93,19 @@ def _candidatos_url(u):
         out += ["https://" + b, "https://www." + b]
     return out
 
+SECTORES = ["Tecnología","Software / SaaS","Telecomunicaciones","Finanzas","Banca","Seguros","Fintech",
+    "Consultoría","Servicios profesionales","Legal","RRHH y Personas","Marketing y Medios","Publicidad",
+    "Ventas / Comercial","Retail / E-commerce","Gran consumo (FMCG)","Alimentación y bebidas","Hostelería y turismo",
+    "Ingeniería","Construcción","Inmobiliario","Industrial / Manufactura","Automoción","Aeroespacial y Defensa",
+    "Energía y Renovables","Utilities","Química","Farmacéutico","Sanidad y salud","Biotecnología",
+    "Logística y transporte","Distribución","Educación y formación","Deporte y ocio","Moda y textil",
+    "Agroalimentario","Medioambiente","Administración pública","ONG / Tercer sector","Startup","Otro"]
+
 def resumir_empresa(url):
+    """Devuelve (resumen, sector_sugerido) a partir de la web. sector puede ser '' si no encaja."""
     if not url.strip():
-        return ""
-    texto = ""; usada = ""
+        return "", ""
+    texto = ""
     for cand in _candidatos_url(url):
         try:
             r = requests.get(cand, timeout=12, headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=True)
@@ -105,18 +114,30 @@ def resumir_empresa(url):
                 t = re.sub(r"<[^>]+>", " ", t)
                 t = re.sub(r"\s+", " ", t).strip()
                 if len(t) > 120:
-                    texto = t[:3500]; usada = cand; break
+                    texto = t[:3500]; break
         except Exception:
             continue
     if not texto:
         return ("(No pude acceder a la web. Revisa el enlace: pon la dirección completa, "
-                "por ejemplo https://www.alimerka.es)")
-    msg = _client().messages.create(model=MODEL, max_tokens=350,
-        system=("Resume en 2-3 frases qué hace esta empresa a partir del texto de su web: sector, actividad y tamaño "
-                "si se deduce. Español de España, sobrio, sin inventar. Solo el resumen."),
+                "por ejemplo https://www.alimerka.es)", "")
+    import json as _json
+    msg = _client().messages.create(model=MODEL, max_tokens=400,
+        system=("A partir del texto de la web de una empresa, devuelve SOLO un JSON válido, sin vallas de código: "
+                '{"resumen": str, "sector": str}. "resumen" = 2-3 frases (español de España, sobrio, sin inventar) '
+                "sobre qué hace la empresa y su tamaño si se deduce. "
+                f'"sector" = elige EXACTAMENTE uno de esta lista: {SECTORES}. Si ninguno encaja, usa "Otro".'),
         messages=[{"role": "user", "content": texto}])
-    resumen = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text").strip()
-    return resumen
+    raw = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text").strip()
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    try:
+        s, e = raw.find("{"), raw.rfind("}")
+        obj = _json.loads(raw[s:e+1])
+        sec = obj.get("sector", "")
+        if sec not in SECTORES:
+            sec = ""
+        return obj.get("resumen", "").strip(), sec
+    except Exception:
+        return raw, ""
 
 QUIENES = ("En Tessera acompañamos a compañías en su crecimiento desde una visión integral de personas, negocio y "
     "estructura. Trabajamos como partners en la construcción de equipos y en la toma de decisiones importantes, "
@@ -155,7 +176,7 @@ CAMPOS_ES = {
     "titulo": "Título del puesto/servicio", "responsabilidades": "Misión y responsabilidades",
     "requisitos": "Requisitos", "idiomas": "Idiomas",
     "banda": "Banda salarial fija", "variable": "Retribución variable", "beneficios": "Beneficios",
-    "modalidad": "Modalidad", "dias_presenciales": "Días presenciales/semana", "ubicacion": "Ubicación",
+    "modalidad": "Modalidad", "dias_presenciales": "Días presenciales/semana", "ubicacion": "Ubicación", "horario": "Horario de los empleados",
     "fases": "Fases del proceso", "pruebas": "Pruebas técnicas", "interlocutor": "Interlocutor",
     "fecha_inicio": "Fecha objetivo/inicio", "atraer": "Por qué unirse",
     "presupuesto": "Presupuesto mensual", "duracion": "Duración", "renovacion": "Renovación/ampliación",
@@ -166,7 +187,7 @@ CAMPOS_ES = {
 def _respuestas_texto(data):
     orden = ["empresa","sector","web","empresa_resumen","sales_nombre","sales_email","titulo","responsabilidades",
              "requisitos","idiomas","banda","variable","beneficios","presupuesto","duracion","renovacion",
-             "incorporacion","modalidad","dias_presenciales","ubicacion","accesos","fases","pruebas","interlocutor",
+             "incorporacion","modalidad","dias_presenciales","ubicacion","horario","accesos","fases","pruebas","interlocutor",
              "responsable","validacion","fecha_inicio","atraer","proyecto"]
     lineas = []
     for k in orden:
@@ -254,6 +275,29 @@ def _lineas_inputs(titulo, kp, ph, ini=3):
         st.rerun()
     return "\n".join(out)
 
+def _idiomas_selector():
+    LANGS = ["Español","Inglés","Francés","Alemán","Italiano","Portugués","Catalán","Gallego","Euskera",
+             "Chino","Árabe","Ruso","Neerlandés","Sueco","Otro"]
+    NIVELES = ["Básico (A1-A2)","Intermedio (B1-B2)","Avanzado (C1)","Nativo/Bilingüe (C2)"]
+    st.markdown("**Idiomas necesarios**")
+    sel = st.multiselect("Idiomas", LANGS, key="idiomas_sel", label_visibility="collapsed")
+    out = []
+    for i, lang in enumerate(sel):
+        cA, cB = st.columns([1, 1.4])
+        cA.markdown(f"<div style='padding-top:6px'>{lang}</div>", unsafe_allow_html=True)
+        niv = cB.selectbox(f"Nivel {lang}", NIVELES, index=1, key=f"niv_{i}_{lang}", label_visibility="collapsed")
+        out.append(f"{lang} — {niv}")
+    return "; ".join(out)
+
+HORAS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+def _horario_selector(kp):
+    st.markdown("**Horario de los empleados**")
+    h1, h2, h3 = st.columns([1, 1, 1.3])
+    ini = h1.selectbox("Entrada", HORAS, index=16, key=f"{kp}_hini")   # 08:00
+    fin = h2.selectbox("Salida", HORAS, index=34, key=f"{kp}_hfin")    # 17:00
+    jornada = h3.selectbox("Jornada", ["Completa","Parcial","Intensiva","Turnos","Flexible"], key=f"{kp}_jornada")
+    return f"{ini} a {fin} · {jornada}"
+
 BANDAS = ["18k","20k","22k","24k","26k","28k","30k","33k","36k","40k","45k","50k","55k","60k","70k","80k","90k","100k+"]
 PPTO = ["1.500€","2.000€","2.500€","3.000€","3.500€","4.000€","5.000€","6.000€","7.000€","8.000€","10.000€","12.000€+"]
 FASES_OPC = ["Entrevista con Tessera","Entrevista con Sales","Entrevista con el cliente",
@@ -295,7 +339,8 @@ if _empresas:
         empresa = sel_emp
 else:
     empresa = c1.text_input("Empresa", key="empresa")
-sector = c2.text_input("Sector", key="sector")
+sector = c2.selectbox("Sector", ["— Selecciona —"] + SECTORES, key="sector_sel")
+sector = "" if sector == "— Selecciona —" else sector
 web = st.text_input("Web de la empresa (pega el enlace y pulsa el botón)", key="web", placeholder="https://…")
 if st.button("🔎 Traer info de la empresa desde la web", key="btn_web"):
     if not web.strip():
@@ -303,7 +348,11 @@ if st.button("🔎 Traer info de la empresa desde la web", key="btn_web"):
     else:
         with st.spinner("Leyendo la web…"):
             try:
-                st.session_state["empresa_resumen_ed"] = resumir_empresa(web)
+                _resumen, _sector = resumir_empresa(web)
+                st.session_state["empresa_resumen_ed"] = _resumen
+                if _sector in SECTORES:
+                    st.session_state["sector_sel"] = _sector   # rellena el sector solo
+                st.rerun()
             except Exception as e:
                 st.error(f"No pude leer la web: {e}")
 resumen_emp = st.text_area("Sobre la empresa (se rellena solo desde la web; editable)", height=90, key="empresa_resumen_ed")
@@ -315,7 +364,7 @@ st.divider()
 titulo = st.text_input("Título del puesto o servicio", key="titulo")
 responsabilidades = _lineas_inputs("Misión y responsabilidades", "resp", "Responsabilidad", ini=3)
 requisitos = _lineas_inputs("Requisitos imprescindibles", "req", "Requisito", ini=3)
-idiomas = st.text_input("Idiomas necesarios", key="idiomas", placeholder="Ej. Español nativo; inglés B2")
+idiomas = _idiomas_selector()
 
 data = {"tipo": tipo, "empresa": empresa, "sector": sector, "web": web,
         "empresa_resumen": resumen_emp, "sales_nombre": sales_nombre, "sales_email": sales_email,
@@ -334,6 +383,7 @@ if tipo == "headhunting":
     data["dias_presenciales"] = st.selectbox("Días presenciales/semana", ["—","1","2","3","4","5"], key="dias")
     data["beneficios"] = st.text_input("Beneficios (opcional)", key="benef", placeholder="Ej. Seguro médico, ticket restaurante")
     data["ubicacion"] = st.text_input("Ubicación de la oficina", key="ubi")
+    data["horario"] = _horario_selector("hh")
     st.markdown("**El proceso**")
     st.caption("Selecciona las fases en el orden en que ocurrirán (el orden de selección se respeta).")
     fases_sel = st.multiselect("Fases de entrevista", FASES_OPC, key="fases_sel")
@@ -361,7 +411,8 @@ else:
     e7, e8 = st.columns(2)
     data["modalidad"] = e7.selectbox("Modalidad", ["Presencial","Híbrido","Remoto"], key="mod")
     data["dias_presenciales"] = e8.selectbox("Días presenciales/semana", ["—","1","2","3","4","5"], key="dias")
-    data["ubicacion"] = st.text_input("Ubicación y horario aplicable", key="ubi")
+    data["ubicacion"] = st.text_input("Ubicación aplicable", key="ubi")
+    data["horario"] = _horario_selector("out")
     data["accesos"] = st.text_input("Equipo y accesos proporcionados", key="accesos")
     st.markdown("**Organización del día a día**")
     data["responsable"] = st.text_input("Responsable del día a día en vuestro equipo", key="resp_dia")
