@@ -243,12 +243,6 @@ def enviar_email(pdf_bytes, data):
     except Exception as e:
         return False, f"No se pudo enviar el email: {e}"
 
-@st.dialog("¡Gracias por tu colaboración!")
-def _gracias_dialog():
-    st.write("Hemos recibido la ficha. **Te contactaremos para avanzar con la vacante.**")
-    st.caption("Se ha enviado a Operaciones y tienes una copia de tus respuestas en tu correo.")
-
-
 # ==================== UI ====================
 if not check_password():
     st.stop()
@@ -444,7 +438,7 @@ if st.button("Enviar información al equipo", type="primary", key="btn_enviar"):
                 ok_sp, m_sp = False, ""
                 ok_xl, m_xl = False, ""
         if ok:
-            _gracias_dialog()
+            st.success(m)
             if not ok_sp:
                 st.warning(m_sp)
             if not ok_xl:
