@@ -8,7 +8,7 @@ import anthropic
 from PIL import Image
 from ficha_pdf import generar_ficha
 from _brand import render_wordmark, FONTS
-from sharepoint_upload import subir_a_sharepoint
+from sharepoint_upload import subir_a_sharepoint, actualizar_registro_excel
 
 st.set_page_config(page_title="Tessera · Alta de vacante", page_icon="📝", layout="centered")
 MODEL = "claude-sonnet-4-6"
@@ -438,18 +438,24 @@ if st.button("Enviar información al equipo", type="primary", key="btn_enviar"):
                 st.session_state["ficha_data"] = data
                 ok, m = enviar_email(pdf, data)
                 ok_sp, m_sp = subir_a_sharepoint(pdf, data)
+                ok_xl, m_xl = actualizar_registro_excel(data)
             except Exception as e:
                 ok, m = False, f"Error generando la ficha: {e}"
                 ok_sp, m_sp = False, ""
+                ok_xl, m_xl = False, ""
         if ok:
             _gracias_dialog()
             if not ok_sp:
                 st.warning(m_sp)
+            if not ok_xl:
+                st.warning(m_xl)
         else:
             st.error(m)
             st.info("Puedes descargar el PDF aquí abajo y enviarlo a mano mientras tanto.")
             if not ok_sp:
                 st.caption(m_sp)
+            if not ok_xl:
+                st.caption(m_xl)
 
 # descarga de respaldo (solo si ya se ha generado)
 if "ficha_pdf" in st.session_state:

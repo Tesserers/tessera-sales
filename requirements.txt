@@ -4,3 +4,4 @@ reportlab>=4.2
 Pillow>=10.0
 fonttools>=4.50
 requests>=2.31
+openpyxl>=3.1
