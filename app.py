@@ -8,7 +8,7 @@ import anthropic
 from PIL import Image
 from ficha_pdf import generar_ficha
 from _brand import render_wordmark, FONTS
-from sharepoint_upload import subir_a_sharepoint, actualizar_registro_excel
+from sharepoint_upload import subir_a_sharepoint, asignar_id_y_registrar
 
 st.set_page_config(page_title="Tessera · Alta de vacante", page_icon="📝", layout="centered")
 MODEL = "claude-sonnet-4-6"
@@ -212,11 +212,12 @@ def enviar_email(pdf_bytes, data):
     remite = st.secrets.get("SMTP_FROM", user)
     tipo = "Headhunting" if data.get("tipo") == "headhunting" else "Outsourcing"
     empresa = data.get("empresa", ""); titulo = data.get("titulo", "")
-    fname = "Ficha_" + re.sub(r"\W+", "", empresa or "Cliente") + ".pdf"
+    vac_id = (data.get("id") or "").strip()
+    fname = f"{vac_id}.pdf" if vac_id else "Ficha_" + re.sub(r"\W+", "", empresa or "Cliente") + ".pdf"
 
     # 1) Operaciones (PDF completo)
     ops = EmailMessage()
-    ops["Subject"] = f"[Alta {tipo}] {empresa} · {titulo}"
+    ops["Subject"] = f"[Alta {tipo}] {vac_id + ' · ' if vac_id else ''}{empresa} · {titulo}"
     ops["From"] = remite; ops["To"] = dest
     if data.get("sales_email"): ops["Reply-To"] = data["sales_email"]
     ops.set_content(f"Nueva ficha de {tipo}.\n\nEmpresa: {empresa}\nPuesto/servicio: {titulo}\n"
@@ -423,6 +424,11 @@ if st.button("Enviar información al equipo", type="primary", key="btn_enviar"):
     else:
         with st.spinner("Montando la ficha y enviándola…"):
             try:
+                # El ID (TSH/TSO/TSR + correlativo) se asigna primero: hace falta para
+                # incluirlo en el PDF y para nombrar el archivo. Deja data["id"] puesto.
+                vac_id, ok_id, m_id = asignar_id_y_registrar(data)
+                if not ok_id:
+                    raise RuntimeError(m_id)
                 try:
                     data["jd"] = generar_jd(data)
                 except Exception:
@@ -432,27 +438,22 @@ if st.button("Enviar información al equipo", type="primary", key="btn_enviar"):
                 st.session_state["ficha_data"] = data
                 ok, m = enviar_email(pdf, data)
                 ok_sp, m_sp = subir_a_sharepoint(pdf, data)
-                ok_xl, m_xl = actualizar_registro_excel(data)
             except Exception as e:
                 ok, m = False, f"Error generando la ficha: {e}"
                 ok_sp, m_sp = False, ""
-                ok_xl, m_xl = False, ""
         if ok:
             st.success(m)
             if not ok_sp:
                 st.warning(m_sp)
-            if not ok_xl:
-                st.warning(m_xl)
         else:
             st.error(m)
             st.info("Puedes descargar el PDF aquí abajo y enviarlo a mano mientras tanto.")
             if not ok_sp:
                 st.caption(m_sp)
-            if not ok_xl:
-                st.caption(m_xl)
 
 # descarga de respaldo (solo si ya se ha generado)
 if "ficha_pdf" in st.session_state:
-    fname = "Ficha_" + re.sub(r"\W+", "", empresa or "Cliente") + ".pdf"
+    _id_gen = (st.session_state.get("ficha_data", {}).get("id") or "").strip()
+    fname = f"{_id_gen}.pdf" if _id_gen else "Ficha_" + re.sub(r"\W+", "", empresa or "Cliente") + ".pdf"
     st.download_button("⬇️ Descargar PDF (opcional)", data=st.session_state["ficha_pdf"],
                        file_name=fname, mime="application/pdf", key="dl")

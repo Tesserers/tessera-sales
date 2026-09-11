@@ -45,9 +45,16 @@ LOCK_TTL_SEGUNDOS = 60      # un lock más viejo que esto se considera huérfano
 LOCK_MAX_INTENTOS = 20      # ~ (20 * 0.5-0.8s) ≈ hasta 16s esperando el turno antes de rendirse
 LOCK_ESPERA_SEGUNDOS = 0.5
 
-# (clave en `data`, encabezado de columna). "fecha_alta" y "tipo" son especiales
+# prefijo del ID según el tipo de alta; numeración compartida (ver _siguiente_numero)
+PREFIJOS_TIPO = {"headhunting": "TSH", "outsourcing": "TSO"}
+PREFIJO_DEFECTO = "TSR"
+ID_INICIAL = 74  # próximo número a usar si el registro todavía no tiene ninguna fila
+_ID_RE = re.compile(r"_(\d+)$")
+
+# (clave en `data`, encabezado de columna). "id", "fecha_alta" y "tipo" son especiales
 # (ver _fila_desde_data): no vienen tal cual de `data`.
 COLUMNAS = [
+    ("id", "ID"),
     ("fecha_alta", "Fecha de alta"),
     ("tipo", "Tipo de alta"),
     ("empresa", "Empresa"),
@@ -136,10 +143,14 @@ def subir_a_sharepoint(pdf_bytes, data):
     except Exception:
         return False, "La subida a SharePoint no está configurada (faltan los secretos SP_*)."
 
-    empresa = data.get("empresa", "") or "Cliente"
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-    empresa_limpia = re.sub(r"\W+", "", empresa)
-    fname = f"Ficha_{empresa_limpia}_{ts}.pdf"
+    vac_id = (data.get("id") or "").strip()
+    if vac_id:
+        fname = f"{vac_id}.pdf"
+    else:
+        empresa = data.get("empresa", "") or "Cliente"
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+        empresa_limpia = re.sub(r"\W+", "", empresa)
+        fname = f"Ficha_{empresa_limpia}_{ts}.pdf"
     folder = _secret("SP_FOLDER_PATH", DEFAULT_FOLDER_PATH).strip("/")
 
     try:
@@ -163,13 +174,29 @@ def _fila_desde_data(data):
     ahora = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
     fila = []
     for key, _ in COLUMNAS:
-        if key == "fecha_alta":
+        if key == "id":
+            fila.append(data.get("id", ""))
+        elif key == "fecha_alta":
             fila.append(ahora)
         elif key == "tipo":
             fila.append(tipo_label)
         else:
             fila.append(str(data.get(key, "") or ""))
     return fila
+
+
+def _siguiente_numero(ws):
+    """Busca en la columna ID (la primera) el número más alto usado hasta ahora, sea
+    cual sea el prefijo (TSH/TSO/TSR comparten una única numeración correlativa).
+    Si el registro todavía no tiene ninguna fila, empieza en ID_INICIAL."""
+    max_num = None
+    for fila in ws.iter_rows(min_row=2, max_col=1, values_only=True):
+        m = _ID_RE.search(str(fila[0] or ""))
+        if m:
+            n = int(m.group(1))
+            if max_num is None or n > max_num:
+                max_num = n
+    return (max_num + 1) if max_num is not None else ID_INICIAL
 
 
 def _lock_path(folder):
@@ -224,21 +251,26 @@ def _liberar_lock(drive_id, token, folder):
         pass  # si falla la limpieza, el TTL lo autolimpiará en la siguiente alta
 
 
-def actualizar_registro_excel(data):
-    """Añade una fila con los datos del alta a `registro_vacantes.xlsx`, en la
-    misma carpeta de SharePoint que los PDFs. Crea el archivo (con cabeceras)
-    si todavía no existe.
+def asignar_id_y_registrar(data):
+    """Genera el ID correlativo de la vacante (TSH/TSO/TSR + número, numeración
+    compartida entre los tres) y añade la fila con los datos del alta a
+    `registro_vacantes.xlsx`, en la misma carpeta de SharePoint que los PDFs.
+    Crea el archivo (con cabeceras) si todavía no existe.
+
+    IMPORTANTE: debe llamarse ANTES de generar el PDF — deja el ID asignado en
+    `data["id"]` (efecto secundario sobre el dict que se le pasa) para que
+    `generar_ficha` y el nombre del archivo puedan usarlo.
 
     Usa un archivo de bloqueo (`registro_vacantes.xlsx.lock`) para que, si dos
     altas se envían casi a la vez, la segunda espere su turno en vez de
-    sobrescribir la fila que acaba de añadir la primera.
+    asignar el mismo número o sobrescribir la fila que acaba de añadir la primera.
 
-    Devuelve (ok: bool, mensaje: str). Nunca lanza excepción.
+    Devuelve (id: str | None, ok: bool, mensaje: str). Nunca lanza excepción.
     """
     try:
         st.secrets["SP_TENANT_ID"]; st.secrets["SP_CLIENT_ID"]; st.secrets["SP_CLIENT_SECRET"]
     except Exception:
-        return False, "El registro en Excel no está configurado (faltan los secretos SP_*)."
+        return None, False, "No se pudo generar el ID de la vacante (faltan los secretos SP_*)."
 
     folder = _secret("SP_FOLDER_PATH", DEFAULT_FOLDER_PATH).strip("/")
     path = "/".join(quote(seg) for seg in folder.split("/")) + "/" + quote(EXCEL_FILENAME)
@@ -247,11 +279,11 @@ def actualizar_registro_excel(data):
         drive_id = _drive_id()
         token = _token()
     except Exception as e:
-        return False, f"No se pudo actualizar el Excel de registro: {e}"
+        return None, False, f"No se pudo generar el ID de la vacante: {e}"
 
     if not _adquirir_lock(drive_id, token, folder):
-        return False, ("No se pudo actualizar el Excel: otra alta lo estaba modificando a la vez "
-                        "y no quedó libre a tiempo. El PDF y el email sí se han enviado.")
+        return None, False, ("No se pudo generar el ID de la vacante: otra alta lo estaba "
+                              "modificando a la vez y no quedó libre a tiempo. Inténtalo de nuevo.")
 
     try:
         auth = {"Authorization": f"Bearer {token}"}
@@ -267,6 +299,11 @@ def actualizar_registro_excel(data):
         else:
             r.raise_for_status()
 
+        numero = _siguiente_numero(ws)
+        prefijo = PREFIJOS_TIPO.get(data.get("tipo"), PREFIJO_DEFECTO)
+        vac_id = f"{prefijo}_{numero:03d}"
+        data["id"] = vac_id
+
         ws.append(_fila_desde_data(data))
 
         buf = io.BytesIO()
@@ -279,8 +316,8 @@ def actualizar_registro_excel(data):
             timeout=30,
         )
         r2.raise_for_status()
-        return True, "Registro actualizado en Excel ✅"
+        return vac_id, True, "Registro actualizado en Excel ✅"
     except Exception as e:
-        return False, f"No se pudo actualizar el Excel de registro: {e}"
+        return None, False, f"No se pudo generar el ID / actualizar el Excel: {e}"
     finally:
         _liberar_lock(drive_id, token, folder)

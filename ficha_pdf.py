@@ -96,6 +96,9 @@ def generar_ficha(data: dict) -> bytes:
     render_wordmark("TESSERA",(240,232,222,255),WM_PEARL,tracking=10)
     S=_st(); tipo=data.get("tipo","headhunting")
     titulo = "FICHA DE VACANTE · HEADHUNTING" if tipo=="headhunting" else "FICHA DE SERVICIO · OUTSOURCING"
+    vac_id = (data.get("id") or "").strip()
+    if vac_id:
+        titulo = f"{titulo} · {vac_id}"
 
     story=[]
     # Empresa
