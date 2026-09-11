@@ -55,6 +55,7 @@ PREFIJOS_TIPO = {"headhunting": "TSH", "outsourcing": "TSO"}
 PREFIJO_DEFECTO = "TSR"
 ID_INICIAL = 74  # próximo número si el Roadmap no tuviera ningún ID todavía (caso límite)
 _ID_RE = re.compile(r"_(\d+)$")
+_FECHA_ALTA_RE = re.compile(r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2}$")  # formato de _fila_desde_data
 
 # el Roadmap real (no este mismo Excel) es la fuente de verdad para el último ID usado
 DEFAULT_ROADMAP_FOLDER_PATH = "Data to Action"
@@ -168,11 +169,10 @@ def subir_a_sharepoint(pdf_bytes, data):
         drive_id = _drive_id()
         token = _token()
         path = "/".join(quote(seg) for seg in folder.split("/")) + "/" + quote(fname)
-        r = requests.put(
+        r = _put_con_reintentos(
             f"{GRAPH}/drives/{drive_id}/root:/{path}:/content",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/pdf"},
             data=pdf_bytes,
-            timeout=30,
         )
         r.raise_for_status()
         return True, "Guardado en SharePoint ✅"
@@ -231,6 +231,22 @@ def _max_id_roadmap():
     return max_num
 
 
+def _put_con_reintentos(url, headers, data, timeout=30, intentos=6, espera_base=1.0):
+    """PUT con reintentos ante bloqueos transitorios de SharePoint:
+    - 423 (Locked): alguien tiene el archivo abierto en Excel (escritorio u online),
+      o queda un bloqueo de coautoría residual de una escritura muy reciente.
+    - 429 / 503: límite de peticiones o servicio temporalmente no disponible.
+    Devuelve la última respuesta recibida (haya tenido éxito o no); quien llama
+    decide si hace raise_for_status()."""
+    r = None
+    for intento in range(intentos):
+        r = requests.put(url, headers=headers, data=data, timeout=timeout)
+        if r.status_code not in (423, 429, 503):
+            return r
+        time.sleep(espera_base * (intento + 1) + random.uniform(0, 0.5))
+    return r
+
+
 def _lock_path(folder):
     return "/".join(quote(seg) for seg in folder.split("/")) + "/" + quote(LOCK_FILENAME)
 
@@ -257,18 +273,21 @@ def _adquirir_lock(drive_id, token, folder):
         )
         if r.status_code in (200, 201):
             return True
-        if r.status_code == 409:
-            try:
-                meta = requests.get(f"{GRAPH}/drives/{drive_id}/root:/{lock_path}", headers=auth, timeout=20)
-                if meta.status_code == 200:
-                    modif = meta.json().get("lastModifiedDateTime", "")
-                    edad = (datetime.datetime.now(datetime.timezone.utc)
-                            - datetime.datetime.fromisoformat(modif.replace("Z", "+00:00"))).total_seconds()
-                    if edad > LOCK_TTL_SEGUNDOS:
-                        requests.delete(f"{GRAPH}/drives/{drive_id}/root:/{lock_path}", headers=auth, timeout=20)
-                        continue  # reintenta inmediatamente tras liberar el lock huérfano
-            except Exception:
-                pass
+        if r.status_code in (409, 423):
+            # 409: ya existe el archivo de bloqueo (otra alta lo tiene cogido).
+            # 423: bloqueado por SharePoint (p. ej. coautoría residual); se trata igual, con espera.
+            if r.status_code == 409:
+                try:
+                    meta = requests.get(f"{GRAPH}/drives/{drive_id}/root:/{lock_path}", headers=auth, timeout=20)
+                    if meta.status_code == 200:
+                        modif = meta.json().get("lastModifiedDateTime", "")
+                        edad = (datetime.datetime.now(datetime.timezone.utc)
+                                - datetime.datetime.fromisoformat(modif.replace("Z", "+00:00"))).total_seconds()
+                        if edad > LOCK_TTL_SEGUNDOS:
+                            requests.delete(f"{GRAPH}/drives/{drive_id}/root:/{lock_path}", headers=auth, timeout=20)
+                            continue  # reintenta inmediatamente tras liberar el lock huérfano
+                except Exception:
+                    pass
             time.sleep(LOCK_ESPERA_SEGUNDOS + random.uniform(0, 0.3))
             continue
         r.raise_for_status()
@@ -348,15 +367,94 @@ def asignar_id_y_registrar(data):
         buf = io.BytesIO()
         wb.save(buf)
 
-        r2 = requests.put(
+        r2 = _put_con_reintentos(
             f"{GRAPH}/drives/{drive_id}/root:/{path}:/content",
             headers={"Authorization": f"Bearer {token}", "Content-Type": XLSX_MIME},
             data=buf.getvalue(),
-            timeout=30,
         )
+        if r2.status_code == 423:
+            return None, False, ("No se pudo guardar el registro: registro_vacantes.xlsx está "
+                                  "abierto en Excel (escritorio u online) por alguien. Ciérralo e "
+                                  "inténtalo de nuevo.")
         r2.raise_for_status()
         return vac_id, True, "Registro actualizado en Excel ✅"
     except Exception as e:
         return None, False, f"No se pudo generar el ID / actualizar el Excel: {e}"
+    finally:
+        _liberar_lock(drive_id, token, folder)
+
+
+def migrar_columna_id():
+    """Migración de un solo uso para `registro_vacantes.xlsx`: reescribe la fila de
+    cabeceras con las columnas actuales (ID primero, Fecha de alta segunda, el
+    resto igual que antes) y desplaza una columna a la derecha las filas que se
+    escribieron ANTES de que existiera la columna ID (se detectan porque su
+    primera celda tiene pinta de fecha "dd/mm/aaaa hh:mm" — el antiguo valor de
+    "Fecha de alta" — en vez de un ID). Esas filas históricas se quedan con el
+    ID en blanco: no se inventa ninguno.
+
+    Idempotente: las filas que ya tengan un ID válido en la primera columna no
+    se tocan, así que se puede pulsar más de una vez sin estropear nada.
+
+    Devuelve (ok: bool, mensaje: str). Nunca lanza excepción.
+    """
+    try:
+        st.secrets["SP_TENANT_ID"]; st.secrets["SP_CLIENT_ID"]; st.secrets["SP_CLIENT_SECRET"]
+    except Exception:
+        return False, "Faltan los secretos SP_* para migrar el registro."
+
+    folder = _secret("SP_FOLDER_PATH", DEFAULT_FOLDER_PATH).strip("/")
+    path = "/".join(quote(seg) for seg in folder.split("/")) + "/" + quote(EXCEL_FILENAME)
+
+    try:
+        drive_id = _drive_id()
+        token = _token()
+    except Exception as e:
+        return False, f"No se pudo conectar con SharePoint: {e}"
+
+    if not _adquirir_lock(drive_id, token, folder):
+        return False, ("No se pudo migrar: el registro está bloqueado por otra alta ahora mismo. "
+                        "Inténtalo de nuevo en unos segundos.")
+
+    try:
+        auth = {"Authorization": f"Bearer {token}"}
+        r = requests.get(f"{GRAPH}/drives/{drive_id}/root:/{path}:/content", headers=auth, timeout=30)
+        if r.status_code == 404:
+            return True, "No existe todavía registro_vacantes.xlsx; no hay nada que migrar."
+        r.raise_for_status()
+        wb = load_workbook(io.BytesIO(r.content))
+        ws = wb.active
+
+        filas_migradas = 0
+        filas_ya_ok = 0
+        for fila in ws.iter_rows(min_row=2):
+            primera = str(fila[0].value or "")
+            if not _FECHA_ALTA_RE.match(primera):
+                filas_ya_ok += 1
+                continue  # no tiene pinta de esquema antiguo (ya migrada, con ID, o vacía): no se toca
+            valores = [c.value for c in fila]
+            for i in range(len(valores) - 1, 0, -1):
+                fila[i].value = valores[i - 1]
+            fila[0].value = None  # fila histórica: no se conoce (ni se inventa) su ID
+            filas_migradas += 1
+
+        for i, (_, label) in enumerate(COLUMNAS, start=1):
+            ws.cell(row=1, column=i, value=label)
+
+        buf = io.BytesIO()
+        wb.save(buf)
+
+        r2 = _put_con_reintentos(
+            f"{GRAPH}/drives/{drive_id}/root:/{path}:/content",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": XLSX_MIME},
+            data=buf.getvalue(),
+        )
+        if r2.status_code == 423:
+            return False, ("El registro está abierto en Excel (escritorio u online) por alguien. "
+                            "Ciérralo e inténtalo de nuevo.")
+        r2.raise_for_status()
+        return True, f"Migración completada: {filas_migradas} fila(s) desplazada(s), {filas_ya_ok} ya estaban bien."
+    except Exception as e:
+        return False, f"No se pudo migrar el registro: {e}"
     finally:
         _liberar_lock(drive_id, token, folder)

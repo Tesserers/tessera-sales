@@ -8,7 +8,7 @@ import anthropic
 from PIL import Image
 from ficha_pdf import generar_ficha
 from _brand import render_wordmark, FONTS
-from sharepoint_upload import subir_a_sharepoint, asignar_id_y_registrar
+from sharepoint_upload import subir_a_sharepoint, asignar_id_y_registrar, migrar_columna_id
 
 st.set_page_config(page_title="Tessera · Alta de vacante", page_icon="📝", layout="centered")
 MODEL = "claude-sonnet-4-6"
@@ -249,7 +249,21 @@ if not check_password():
     st.stop()
 header()
 
-MESES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
+# Herramienta de mantenimiento (uso puntual): arregla la cabecera de registro_vacantes.xlsx
+# para las filas que se escribieron antes de que existiera la columna ID. Oculta tras
+# ?migrar=1 en la URL para que nadie más la vea ni la pulse por error.
+if st.query_params.get("migrar") == "1":
+    st.divider()
+    st.subheader("🔧 Migración: columna ID en el registro")
+    st.caption("Arregla la cabecera y desplaza las filas antiguas de registro_vacantes.xlsx. "
+               "Es seguro pulsarlo más de una vez: las filas que ya estén bien no se tocan.")
+    if st.button("Migrar registro ahora", key="btn_migrar"):
+        with st.spinner("Migrando…"):
+            ok_m, m_m = migrar_columna_id()
+        (st.success if ok_m else st.error)(m_m)
+    st.divider()
+
+MESES =["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
 def _fecha_es(d):
     return f"{d.day} de {MESES[d.month-1]} de {d.year}" if d else ""
 
