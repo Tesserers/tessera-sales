@@ -11,12 +11,17 @@ administrador) y estos secretos en `st.secrets` (o variables de entorno):
 
 Opcionales (si no se indican, apuntan al sitio/carpeta de RRHH ya acordados):
 
-    SP_SITE_HOSTNAME   Host del tenant de SharePoint. Por defecto:
-                       "tesseraservices.sharepoint.com".
-    SP_SITE_PATH       Ruta del sitio. Por defecto: "/sites/hrteam2".
-    SP_FOLDER_PATH     Carpeta destino dentro de la biblioteca "Documentos
-                       compartidos". Por defecto:
-                       "Data to Action/Altas de Vacante Tessera Sales".
+    SP_SITE_HOSTNAME       Host del tenant de SharePoint. Por defecto:
+                           "tesseraservices.sharepoint.com".
+    SP_SITE_PATH           Ruta del sitio. Por defecto: "/sites/hrteam2".
+    SP_FOLDER_PATH         Carpeta destino dentro de la biblioteca "Documentos
+                           compartidos". Por defecto:
+                           "Data to Action/Altas de Vacante Tessera Sales".
+    SP_ROADMAP_FOLDER_PATH Carpeta del Roadmap real. Por defecto: "Data to Action".
+    SP_ROADMAP_FILENAME    Nombre del archivo del Roadmap. Por defecto: "Roadmap.xlsx".
+    SP_ROADMAP_SHEET       Hoja con el pipeline de vacantes. Por defecto: "PIPELINE".
+    SP_ROADMAP_FILA_INICIO Primera fila con datos (antes hay título/cabeceras).
+                           Por defecto: 6.
 
 Ver SHAREPOINT_SETUP.md para los pasos de configuración en Azure AD.
 """
@@ -45,11 +50,17 @@ LOCK_TTL_SEGUNDOS = 60      # un lock más viejo que esto se considera huérfano
 LOCK_MAX_INTENTOS = 20      # ~ (20 * 0.5-0.8s) ≈ hasta 16s esperando el turno antes de rendirse
 LOCK_ESPERA_SEGUNDOS = 0.5
 
-# prefijo del ID según el tipo de alta; numeración compartida (ver _siguiente_numero)
+# prefijo del ID según el tipo de alta; numeración compartida (ver _max_id_roadmap)
 PREFIJOS_TIPO = {"headhunting": "TSH", "outsourcing": "TSO"}
 PREFIJO_DEFECTO = "TSR"
-ID_INICIAL = 74  # próximo número a usar si el registro todavía no tiene ninguna fila
+ID_INICIAL = 74  # próximo número si el Roadmap no tuviera ningún ID todavía (caso límite)
 _ID_RE = re.compile(r"_(\d+)$")
+
+# el Roadmap real (no este mismo Excel) es la fuente de verdad para el último ID usado
+DEFAULT_ROADMAP_FOLDER_PATH = "Data to Action"
+DEFAULT_ROADMAP_FILENAME = "Roadmap.xlsx"
+DEFAULT_ROADMAP_SHEET = "PIPELINE"
+DEFAULT_ROADMAP_FILA_INICIO = 6  # las filas 1-5 son título/nota/cabeceras, los datos empiezan en la 6
 
 # (clave en `data`, encabezado de columna). "id", "fecha_alta" y "tipo" son especiales
 # (ver _fila_desde_data): no vienen tal cual de `data`.
@@ -185,18 +196,39 @@ def _fila_desde_data(data):
     return fila
 
 
-def _siguiente_numero(ws):
-    """Busca en la columna ID (la primera) el número más alto usado hasta ahora, sea
-    cual sea el prefijo (TSH/TSO/TSR comparten una única numeración correlativa).
-    Si el registro todavía no tiene ninguna fila, empieza en ID_INICIAL."""
+def _max_id_roadmap():
+    """Lee la columna ID (A) del Roadmap real (hoja PIPELINE, a partir de la fila
+    configurada) y devuelve el número más alto usado hasta ahora, sea cual sea el
+    prefijo (TSH/TSO/TSR comparten una única numeración correlativa) — el propio
+    Roadmap no borra filas, las vacía, así que basta con quedarse con el máximo
+    visto en toda la columna.
+
+    Devuelve None si no hay ningún ID todavía. Lanza excepción si no se puede leer
+    el archivo (red, permisos, nombre de hoja/archivo incorrecto...).
+    """
+    drive_id = _drive_id()
+    token = _token()
+    folder = _secret("SP_ROADMAP_FOLDER_PATH", DEFAULT_ROADMAP_FOLDER_PATH).strip("/")
+    fname = _secret("SP_ROADMAP_FILENAME", DEFAULT_ROADMAP_FILENAME)
+    path = "/".join(quote(seg) for seg in folder.split("/")) + "/" + quote(fname)
+
+    r = requests.get(f"{GRAPH}/drives/{drive_id}/root:/{path}:/content",
+                      headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    r.raise_for_status()
+    wb = load_workbook(io.BytesIO(r.content), data_only=True)  # data_only: valores calculados, no las fórmulas
+
+    hoja = _secret("SP_ROADMAP_SHEET", DEFAULT_ROADMAP_SHEET)
+    ws = wb[hoja] if hoja in wb.sheetnames else wb.active
+
+    fila_inicio = int(_secret("SP_ROADMAP_FILA_INICIO", DEFAULT_ROADMAP_FILA_INICIO))
     max_num = None
-    for fila in ws.iter_rows(min_row=2, max_col=1, values_only=True):
+    for fila in ws.iter_rows(min_row=fila_inicio, max_col=1, values_only=True):
         m = _ID_RE.search(str(fila[0] or ""))
         if m:
             n = int(m.group(1))
             if max_num is None or n > max_num:
                 max_num = n
-    return (max_num + 1) if max_num is not None else ID_INICIAL
+    return max_num
 
 
 def _lock_path(folder):
@@ -252,18 +284,21 @@ def _liberar_lock(drive_id, token, folder):
 
 
 def asignar_id_y_registrar(data):
-    """Genera el ID correlativo de la vacante (TSH/TSO/TSR + número, numeración
-    compartida entre los tres) y añade la fila con los datos del alta a
+    """Genera el ID correlativo de la vacante (TSH/TSO/TSR + número) leyendo el
+    último número usado en el Roadmap real (hoja PIPELINE, columna ID) — la
+    numeración es compartida entre TSH/TSO/TSR, se basa únicamente en el máximo
+    encontrado ahí — y añade la fila con los datos del alta a
     `registro_vacantes.xlsx`, en la misma carpeta de SharePoint que los PDFs.
-    Crea el archivo (con cabeceras) si todavía no existe.
+    Crea este último archivo (con cabeceras) si todavía no existe.
 
     IMPORTANTE: debe llamarse ANTES de generar el PDF — deja el ID asignado en
     `data["id"]` (efecto secundario sobre el dict que se le pasa) para que
     `generar_ficha` y el nombre del archivo puedan usarlo.
 
     Usa un archivo de bloqueo (`registro_vacantes.xlsx.lock`) para que, si dos
-    altas se envían casi a la vez, la segunda espere su turno en vez de
-    asignar el mismo número o sobrescribir la fila que acaba de añadir la primera.
+    altas se envían casi a la vez DESDE ESTA APP, la segunda espere su turno en
+    vez de leer el Roadmap antes de que la primera haya podido registrar el suyo
+    (no protege frente a alguien editando el Roadmap a mano en el mismo instante).
 
     Devuelve (id: str | None, ok: bool, mensaje: str). Nunca lanza excepción.
     """
@@ -299,7 +334,11 @@ def asignar_id_y_registrar(data):
         else:
             r.raise_for_status()
 
-        numero = _siguiente_numero(ws)
+        try:
+            max_roadmap = _max_id_roadmap()
+        except Exception as e:
+            return None, False, f"No se pudo leer el Roadmap para asignar el ID: {e}"
+        numero = (max_roadmap + 1) if max_roadmap is not None else ID_INICIAL
         prefijo = PREFIJOS_TIPO.get(data.get("tipo"), PREFIJO_DEFECTO)
         vac_id = f"{prefijo}_{numero:03d}"
         data["id"] = vac_id
