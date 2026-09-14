@@ -145,19 +145,23 @@ QUIENES = ("En Tessera acompañamos a compañías en su crecimiento desde una vi
     "combinando talento y estrategia para profesionalizar procesos críticos allí donde más impacto se genera. "
     "Creemos en construir better decisions, together, colaborando de forma cercana con compañías y profesionales "
     "para conectar talento con proyectos en momentos clave de crecimiento.")
-NOTA = ("En Tessera gestionamos el proceso de selección en colaboración con la compañía, acompañando tanto al cliente "
-    "como a los profesionales durante todas las fases, con un enfoque cercano, transparente y profesional.")
+NOTA_IGUALDAD = ("En Tessera defendemos la igualdad de oportunidades y la diversidad como parte fundamental de "
+    "nuestra cultura. Valoramos a las personas por su talento, experiencia y potencial, independientemente de su "
+    "género, edad, origen, orientación sexual, identidad de género, religión, discapacidad o cualquier otra "
+    "condición personal.\n"
+    "Nos comprometemos a ofrecer un proceso de selección justo, transparente y accesible, y a crear un entorno "
+    "de trabajo respetuoso e inclusivo.")
 
 def generar_jd(data):
     sistema = (
         "Redactas ofertas de empleo (JD) de Tessera Human Capital en español de España. Usa EXACTAMENTE esta "
         "estructura y estos encabezados, en este orden:\n"
         "Quiénes somos\n(texto fijo que te doy, cópialo tal cual)\n\nEl reto\n(2-3 frases + viñetas de responsabilidades)\n\n"
-        "Requisitos\n(viñetas)\n\nSerá un plus si\n(viñetas)\n\nQué se ofrece\n(viñetas)\n\nNota sobre el proceso\n"
-        "(texto fijo que te doy, cópialo tal cual).\n"
+        "Requisitos\n(viñetas)\n\nSerá un plus si\n(viñetas)\n\nQué se ofrece\n(viñetas).\n"
+        "No añadas ninguna sección más después de 'Qué se ofrece' (el resto lo añade la aplicación aparte).\n"
         "Reglas: viñetas con guion '-'; no uses la palabra 'clave' (usa 'críticos' o 'importantes'); no inventes datos "
         "que no estén; no menciones el nombre del cliente; sin em dashes; tono cercano y profesional. Devuelve solo la JD.")
-    payload = {"quienes_somos_fijo": QUIENES, "nota_proceso_fijo": NOTA,
+    payload = {"quienes_somos_fijo": QUIENES,
                "rol": data.get("titulo", ""), "empresa_tipo_sector": data.get("sector", ""),
                "ubicacion_modalidad": " ".join([data.get("ubicacion", ""), data.get("modalidad", "")]).strip(),
                "responsabilidades": data.get("responsabilidades", ""), "requisitos": data.get("requisitos", ""),
@@ -169,7 +173,12 @@ def generar_jd(data):
     import json
     msg = _client().messages.create(model=MODEL, max_tokens=1500, system=sistema,
         messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}])
-    return "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text").strip()
+    jd = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text").strip()
+    # Bloque final fijo, añadido aquí (no por Claude) para que salga siempre igual, sin riesgo
+    # de que el modelo lo parafrasee: "Nota sobre el proceso" como título, y justo debajo
+    # "Igualdad de oportunidades" con su texto.
+    jd += "\n\nNota sobre el proceso\nIgualdad de oportunidades\n" + NOTA_IGUALDAD
+    return jd
 
 CAMPOS_ES = {
     "empresa": "Empresa", "sector": "Sector", "web": "Web", "empresa_resumen": "Sobre la empresa",

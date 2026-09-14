@@ -185,7 +185,8 @@ def generar_ficha(data: dict) -> bytes:
                              ParagraphStyle("jdli",fontName="Raleway",fontSize=9,textColor=INK,leading=13,
                                             leftIndent=12,firstLineIndent=-12)))
             elif b.strip().isupper() or b.strip().endswith(":") or b.strip() in (
-                 "Quiénes somos","El reto","Requisitos","Será un plus si","Qué se ofrece","Nota sobre el proceso"):
+                 "Quiénes somos","El reto","Requisitos","Será un plus si","Qué se ofrece",
+                 "Nota sobre el proceso","Igualdad de oportunidades"):
                 story.append(Spacer(1,3))
                 story.append(Paragraph(_esc(b.strip()), S["h"]))
             else:
