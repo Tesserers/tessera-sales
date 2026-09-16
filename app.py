@@ -102,10 +102,19 @@ SECTORES = ["Tecnología","Software / SaaS","Telecomunicaciones","Finanzas","Ban
     "Logística y transporte","Distribución","Educación y formación","Deporte y ocio","Moda y textil",
     "Agroalimentario","Medioambiente","Administración pública","ONG / Tercer sector","Startup","Otro"]
 
+def _normaliza_empresa(nombre):
+    """Limpia espacios y pone en mayúscula la primera letra (si no lo está ya).
+    No toca el resto del nombre (p. ej. 'PCComponentes' se queda igual), solo la primera letra."""
+    n = re.sub(r"\s+", " ", (nombre or "").strip())
+    if n and not n[0].isupper():
+        n = n[0].upper() + n[1:]
+    return n
+
 def resumir_empresa(url):
-    """Devuelve (resumen, sector_sugerido) a partir de la web. sector puede ser '' si no encaja."""
+    """Devuelve (resumen, sector_sugerido, nombre_sugerido) a partir de la web.
+    sector/nombre pueden ser '' si no se pueden deducir con confianza."""
     if not url.strip():
-        return "", ""
+        return "", "", ""
     texto = ""
     for cand in _candidatos_url(url):
         try:
@@ -120,13 +129,15 @@ def resumir_empresa(url):
             continue
     if not texto:
         return ("(No pude acceder a la web. Revisa el enlace: pon la dirección completa, "
-                "por ejemplo https://www.alimerka.es)", "")
+                "por ejemplo https://www.alimerka.es)", "", "")
     import json as _json
     msg = _client().messages.create(model=MODEL, max_tokens=400,
         system=("A partir del texto de la web de una empresa, devuelve SOLO un JSON válido, sin vallas de código: "
-                '{"resumen": str, "sector": str}. "resumen" = 2-3 frases (español de España, sobrio, sin inventar) '
-                "sobre qué hace la empresa y su tamaño si se deduce. "
-                f'"sector" = elige EXACTAMENTE uno de esta lista: {SECTORES}. Si ninguno encaja, usa "Otro".'),
+                '{"resumen": str, "sector": str, "empresa": str}. "resumen" = 2-3 frases (español de España, sobrio, '
+                'sin inventar) sobre qué hace la empresa y su tamaño si se deduce. '
+                f'"sector" = elige EXACTAMENTE uno de esta lista: {SECTORES}. Si ninguno encaja, usa "Otro". '
+                '"empresa" = nombre comercial de la empresa tal como aparece en la web (el que usarías para '
+                'dirigirte a ella formalmente); si no se ve con claridad, deja "".'),
         messages=[{"role": "user", "content": texto}])
     raw = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text").strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
@@ -136,9 +147,9 @@ def resumir_empresa(url):
         sec = obj.get("sector", "")
         if sec not in SECTORES:
             sec = ""
-        return obj.get("resumen", "").strip(), sec
+        return obj.get("resumen", "").strip(), sec, obj.get("empresa", "").strip()
     except Exception:
-        return raw, ""
+        return raw, "", ""
 
 QUIENES = ("En Tessera acompañamos a compañías en su crecimiento desde una visión integral de personas, negocio y "
     "estructura. Trabajamos como partners en la construcción de equipos y en la toma de decisiones importantes, "
@@ -333,31 +344,10 @@ tipo_sel = st.segmented_control("Tipo de alta", ["Headhunting", "Outsourcing"],
 tipo = "headhunting" if (tipo_sel or "Headhunting") == "Headhunting" else "outsourcing"
 st.divider()
 
-def cargar_empresas():
-    p = ruta("empresas.txt")
-    if not os.path.exists(p):
-        return []
-    with open(p, encoding="utf-8") as f:
-        nombres = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
-    # únicas y ordenadas alfabéticamente (sin distinguir mayúsculas/acentos)
-    vistas, out = set(), []
-    for n in sorted(nombres, key=lambda s: s.lower()):
-        if n.lower() not in vistas:
-            vistas.add(n.lower()); out.append(n)
-    return out
-
 st.markdown("**Empresa y contacto**")
-_empresas = cargar_empresas()
 c1, c2 = st.columns(2)
-NUEVA = "➕ Añadir empresa nueva…"
-if _empresas:
-    sel_emp = c1.selectbox("Empresa (del roadmap)", _empresas + [NUEVA], key="empresa_sel")
-    if sel_emp == NUEVA:
-        empresa = c1.text_input("Nombre de la empresa nueva", key="empresa_nueva")
-    else:
-        empresa = sel_emp
-else:
-    empresa = c1.text_input("Empresa", key="empresa")
+empresa = c1.text_input("Empresa (escríbela o pega la web y pulsa el botón de abajo)", key="empresa")
+empresa = _normaliza_empresa(empresa)
 sector = c2.selectbox("Sector", ["— Selecciona —"] + SECTORES, key="sector_sel")
 sector = "" if sector == "— Selecciona —" else sector
 web = st.text_input("Web de la empresa (pega el enlace y pulsa el botón)", key="web", placeholder="https://…")
@@ -367,10 +357,12 @@ if st.button("🔎 Traer info de la empresa desde la web", key="btn_web"):
     else:
         with st.spinner("Leyendo la web…"):
             try:
-                _resumen, _sector = resumir_empresa(web)
+                _resumen, _sector, _nombre = resumir_empresa(web)
                 st.session_state["empresa_resumen_ed"] = _resumen
                 if _sector in SECTORES:
                     st.session_state["sector_sel"] = _sector   # rellena el sector solo
+                if _nombre:
+                    st.session_state["empresa"] = _normaliza_empresa(_nombre)  # rellena la empresa sola
                 st.rerun()
             except Exception as e:
                 st.error(f"No pude leer la web: {e}")
