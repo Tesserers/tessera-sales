@@ -159,6 +159,19 @@ def crear_vacante(data):
             except Exception:
                 pass
 
+        # guardar_vacante asigna responsable/comercial/recruiter a quien la crea (aquí, esta
+        # misma cuenta de servicio) si no se indica lo contrario. La vacante tiene que quedar
+        # SIN ASIGNAR para que Operaciones la reparta, así que se limpia aparte justo después
+        # (no crítico para el alta: si falla, la vacante ya está creada, solo quedaría asignada
+        # al bot en vez de sin asignar).
+        try:
+            requests.patch(f"{url}/rest/v1/vacantes_interno", headers=headers,
+                            params={"vacante_id": f"eq.{vacante_id}"},
+                            json={"responsable_id": None, "comercial_id": None, "recruiter_id": None},
+                            timeout=20)
+        except Exception:
+            pass
+
         return codigo, True, "Vacante creada en el CRM ✅"
     except Exception as e:
         return None, False, f"No se pudo guardar la vacante en el CRM: {e}"

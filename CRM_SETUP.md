@@ -62,5 +62,9 @@ email como hasta ahora.
   código de la vacante (necesario para el PDF y el nombre de archivo) tiene que
   venir del CRM. Se muestra un error claro explicando qué ha fallado.
 - Si la empresa no existía en el CRM, se crea sola con ese nombre.
+- La vacante se crea **sin asignar** (sin responsable, comercial ni recruiter):
+  el CRM, por defecto, asignaría esos tres campos a quien la crea (aquí, la
+  propia cuenta de servicio), así que la app los deja explícitamente en blanco
+  justo después para que Operaciones la reparta.
 - El sector de la empresa solo se rellena si estaba vacío (no pisa un sector
   que ya se hubiera puesto a mano en el CRM).
