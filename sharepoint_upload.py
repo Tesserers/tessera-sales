@@ -11,22 +11,20 @@ administrador) y estos secretos en `st.secrets` (o variables de entorno):
 
 Opcionales (si no se indican, apuntan al sitio/carpeta de RRHH ya acordados):
 
-    SP_SITE_HOSTNAME       Host del tenant de SharePoint. Por defecto:
-                           "tesseraservices.sharepoint.com".
-    SP_SITE_PATH           Ruta del sitio. Por defecto: "/sites/hrteam2".
-    SP_FOLDER_PATH         Carpeta destino dentro de la biblioteca "Documentos
-                           compartidos". Por defecto:
-                           "Data to Action/Altas de Vacante Tessera Sales".
-    SP_ROADMAP_FOLDER_PATH Carpeta del Roadmap real. Por defecto: "Data to Action".
-    SP_ROADMAP_FILENAME    Nombre del archivo del Roadmap. Por defecto: "Roadmap.xlsx".
-    SP_ROADMAP_SHEET       Hoja con el pipeline de vacantes. Por defecto: "PIPELINE".
-    SP_ROADMAP_FILA_INICIO Primera fila con datos (antes hay título/cabeceras).
-                           Por defecto: 6.
+    SP_SITE_HOSTNAME   Host del tenant de SharePoint. Por defecto:
+                       "tesseraservices.sharepoint.com".
+    SP_SITE_PATH       Ruta del sitio. Por defecto: "/sites/hrteam2".
+    SP_FOLDER_PATH     Carpeta destino dentro de la biblioteca "Documentos
+                       compartidos". Por defecto:
+                       "Data to Action/Altas de Vacante Tessera Sales".
 
 Ver SHAREPOINT_SETUP.md para los pasos de configuración en Azure AD.
+
+Nota: el registro de la vacante (ID correlativo, datos del alta) ya NO se lleva
+aquí — se guarda directamente en el CRM (ver crm_upload.py). Este módulo solo
+se ocupa de subir el PDF ya generado.
 """
 import datetime
-import io
 import random
 import re
 import time
@@ -34,71 +32,11 @@ from urllib.parse import quote
 
 import requests
 import streamlit as st
-from openpyxl import Workbook, load_workbook
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 DEFAULT_SITE_HOSTNAME = "tesseraservices.sharepoint.com"
 DEFAULT_SITE_PATH = "/sites/hrteam2"
 DEFAULT_FOLDER_PATH = "Data to Action/Altas de Vacante Tessera Sales"
-
-EXCEL_FILENAME = "registro_vacantes.xlsx"
-XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-# --- bloqueo para evitar que dos altas simultáneas se pisen al escribir el Excel ---
-LOCK_FILENAME = EXCEL_FILENAME + ".lock"
-LOCK_TTL_SEGUNDOS = 60      # un lock más viejo que esto se considera huérfano (proceso caído) y se libera solo
-LOCK_MAX_INTENTOS = 20      # ~ (20 * 0.5-0.8s) ≈ hasta 16s esperando el turno antes de rendirse
-LOCK_ESPERA_SEGUNDOS = 0.5
-
-# prefijo del ID según el tipo de alta; numeración compartida (ver _max_id_roadmap)
-PREFIJOS_TIPO = {"headhunting": "TSH", "outsourcing": "TSO"}
-PREFIJO_DEFECTO = "TSR"
-ID_INICIAL = 74  # próximo número si el Roadmap no tuviera ningún ID todavía (caso límite)
-_ID_RE = re.compile(r"_(\d+)$")
-_FECHA_ALTA_RE = re.compile(r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2}$")  # formato de _fila_desde_data
-
-# el Roadmap real (no este mismo Excel) es la fuente de verdad para el último ID usado
-DEFAULT_ROADMAP_FOLDER_PATH = "Data to Action"
-DEFAULT_ROADMAP_FILENAME = "Roadmap.xlsx"
-DEFAULT_ROADMAP_SHEET = "PIPELINE"
-DEFAULT_ROADMAP_FILA_INICIO = 6  # las filas 1-5 son título/nota/cabeceras, los datos empiezan en la 6
-
-# (clave en `data`, encabezado de columna). "id", "fecha_alta" y "tipo" son especiales
-# (ver _fila_desde_data): no vienen tal cual de `data`.
-COLUMNAS = [
-    ("id", "ID"),
-    ("fecha_alta", "Fecha de alta"),
-    ("tipo", "Tipo de alta"),
-    ("empresa", "Empresa"),
-    ("sector", "Sector"),
-    ("web", "Web"),
-    ("empresa_resumen", "Sobre la empresa"),
-    ("sales_nombre", "Comercial"),
-    ("sales_email", "Email del comercial"),
-    ("titulo", "Título del puesto/servicio"),
-    ("responsabilidades", "Misión y responsabilidades"),
-    ("requisitos", "Requisitos"),
-    ("idiomas", "Idiomas"),
-    ("banda", "Banda salarial fija"),
-    ("variable", "Retribución variable"),
-    ("beneficios", "Beneficios"),
-    ("presupuesto", "Presupuesto mensual"),
-    ("duracion", "Duración"),
-    ("renovacion", "Renovación/ampliación"),
-    ("incorporacion", "Incorporación a plantilla"),
-    ("modalidad", "Modalidad"),
-    ("dias_presenciales", "Días presenciales/semana"),
-    ("ubicacion", "Ubicación"),
-    ("horario", "Horario de los empleados"),
-    ("accesos", "Equipo y accesos"),
-    ("fases", "Fases del proceso"),
-    ("interlocutor", "Interlocutor"),
-    ("responsable", "Responsable del día a día"),
-    ("validacion", "Validación del perfil"),
-    ("fecha_inicio", "Fecha objetivo/inicio"),
-    ("atraer", "Por qué unirse"),
-    ("proyecto", "Proyecto"),
-]
 
 
 def _secret(name, default=None):
@@ -143,6 +81,22 @@ def _drive_id():
     return r.json()["id"]
 
 
+def _put_con_reintentos(url, headers, data, timeout=30, intentos=6, espera_base=1.0):
+    """PUT con reintentos ante bloqueos transitorios de SharePoint:
+    - 423 (Locked): alguien tiene el archivo abierto en Excel (escritorio u online),
+      o queda un bloqueo de coautoría residual de una escritura muy reciente.
+    - 429 / 503: límite de peticiones o servicio temporalmente no disponible.
+    Devuelve la última respuesta recibida (haya tenido éxito o no); quien llama
+    decide si hace raise_for_status()."""
+    r = None
+    for intento in range(intentos):
+        r = requests.put(url, headers=headers, data=data, timeout=timeout)
+        if r.status_code not in (423, 429, 503):
+            return r
+        time.sleep(espera_base * (intento + 1) + random.uniform(0, 0.5))
+    return r
+
+
 def subir_a_sharepoint(pdf_bytes, data):
     """Sube el PDF a la carpeta de SharePoint configurada.
 
@@ -178,283 +132,3 @@ def subir_a_sharepoint(pdf_bytes, data):
         return True, "Guardado en SharePoint ✅"
     except Exception as e:
         return False, f"No se pudo guardar en SharePoint: {e}"
-
-
-def _fila_desde_data(data):
-    tipo_label = "Headhunting" if data.get("tipo") == "headhunting" else "Outsourcing"
-    ahora = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
-    fila = []
-    for key, _ in COLUMNAS:
-        if key == "id":
-            fila.append(data.get("id", ""))
-        elif key == "fecha_alta":
-            fila.append(ahora)
-        elif key == "tipo":
-            fila.append(tipo_label)
-        else:
-            fila.append(str(data.get(key, "") or ""))
-    return fila
-
-
-def _max_id_roadmap():
-    """Lee la columna ID (A) del Roadmap real (hoja PIPELINE, a partir de la fila
-    configurada) y devuelve el número más alto usado hasta ahora, sea cual sea el
-    prefijo (TSH/TSO/TSR comparten una única numeración correlativa) — el propio
-    Roadmap no borra filas, las vacía, así que basta con quedarse con el máximo
-    visto en toda la columna.
-
-    Devuelve None si no hay ningún ID todavía. Lanza excepción si no se puede leer
-    el archivo (red, permisos, nombre de hoja/archivo incorrecto...).
-    """
-    drive_id = _drive_id()
-    token = _token()
-    folder = _secret("SP_ROADMAP_FOLDER_PATH", DEFAULT_ROADMAP_FOLDER_PATH).strip("/")
-    fname = _secret("SP_ROADMAP_FILENAME", DEFAULT_ROADMAP_FILENAME)
-    path = "/".join(quote(seg) for seg in folder.split("/")) + "/" + quote(fname)
-
-    r = requests.get(f"{GRAPH}/drives/{drive_id}/root:/{path}:/content",
-                      headers={"Authorization": f"Bearer {token}"}, timeout=30)
-    r.raise_for_status()
-    wb = load_workbook(io.BytesIO(r.content), data_only=True)  # data_only: valores calculados, no las fórmulas
-
-    hoja = _secret("SP_ROADMAP_SHEET", DEFAULT_ROADMAP_SHEET)
-    ws = wb[hoja] if hoja in wb.sheetnames else wb.active
-
-    fila_inicio = int(_secret("SP_ROADMAP_FILA_INICIO", DEFAULT_ROADMAP_FILA_INICIO))
-    max_num = None
-    for fila in ws.iter_rows(min_row=fila_inicio, max_col=1, values_only=True):
-        m = _ID_RE.search(str(fila[0] or ""))
-        if m:
-            n = int(m.group(1))
-            if max_num is None or n > max_num:
-                max_num = n
-    return max_num
-
-
-def _put_con_reintentos(url, headers, data, timeout=30, intentos=6, espera_base=1.0):
-    """PUT con reintentos ante bloqueos transitorios de SharePoint:
-    - 423 (Locked): alguien tiene el archivo abierto en Excel (escritorio u online),
-      o queda un bloqueo de coautoría residual de una escritura muy reciente.
-    - 429 / 503: límite de peticiones o servicio temporalmente no disponible.
-    Devuelve la última respuesta recibida (haya tenido éxito o no); quien llama
-    decide si hace raise_for_status()."""
-    r = None
-    for intento in range(intentos):
-        r = requests.put(url, headers=headers, data=data, timeout=timeout)
-        if r.status_code not in (423, 429, 503):
-            return r
-        time.sleep(espera_base * (intento + 1) + random.uniform(0, 0.5))
-    return r
-
-
-def _lock_path(folder):
-    return "/".join(quote(seg) for seg in folder.split("/")) + "/" + quote(LOCK_FILENAME)
-
-
-def _adquirir_lock(drive_id, token, folder):
-    """Crea el archivo de bloqueo de forma atómica: `@microsoft.graph.conflictBehavior=fail`
-    hace que la escritura falle (409) si el archivo ya existe, en vez de sobrescribirlo —
-    así solo un proceso puede "ganar" la carrera aunque dos altas lleguen a la vez.
-
-    Si el bloqueo ya existe pero es más viejo que LOCK_TTL_SEGUNDOS, se asume huérfano
-    (de un proceso anterior que falló sin liberarlo) y se borra para reintentar.
-
-    Devuelve True si se consiguió el bloqueo, False si se agotaron los intentos.
-    """
-    lock_path = _lock_path(folder)
-    auth = {"Authorization": f"Bearer {token}"}
-    marca = datetime.datetime.now(datetime.timezone.utc).isoformat().encode()
-
-    for _ in range(LOCK_MAX_INTENTOS):
-        r = requests.put(
-            f"{GRAPH}/drives/{drive_id}/root:/{lock_path}:/content?@microsoft.graph.conflictBehavior=fail",
-            headers={**auth, "Content-Type": "text/plain"},
-            data=marca, timeout=20,
-        )
-        if r.status_code in (200, 201):
-            return True
-        if r.status_code in (409, 423):
-            # 409: ya existe el archivo de bloqueo (otra alta lo tiene cogido).
-            # 423: bloqueado por SharePoint (p. ej. coautoría residual); se trata igual, con espera.
-            if r.status_code == 409:
-                try:
-                    meta = requests.get(f"{GRAPH}/drives/{drive_id}/root:/{lock_path}", headers=auth, timeout=20)
-                    if meta.status_code == 200:
-                        modif = meta.json().get("lastModifiedDateTime", "")
-                        edad = (datetime.datetime.now(datetime.timezone.utc)
-                                - datetime.datetime.fromisoformat(modif.replace("Z", "+00:00"))).total_seconds()
-                        if edad > LOCK_TTL_SEGUNDOS:
-                            requests.delete(f"{GRAPH}/drives/{drive_id}/root:/{lock_path}", headers=auth, timeout=20)
-                            continue  # reintenta inmediatamente tras liberar el lock huérfano
-                except Exception:
-                    pass
-            time.sleep(LOCK_ESPERA_SEGUNDOS + random.uniform(0, 0.3))
-            continue
-        r.raise_for_status()
-    return False
-
-
-def _liberar_lock(drive_id, token, folder):
-    try:
-        requests.delete(f"{GRAPH}/drives/{drive_id}/root:/{_lock_path(folder)}",
-                         headers={"Authorization": f"Bearer {token}"}, timeout=20)
-    except Exception:
-        pass  # si falla la limpieza, el TTL lo autolimpiará en la siguiente alta
-
-
-def asignar_id_y_registrar(data):
-    """Genera el ID correlativo de la vacante (TSH/TSO/TSR + número) leyendo el
-    último número usado en el Roadmap real (hoja PIPELINE, columna ID) — la
-    numeración es compartida entre TSH/TSO/TSR, se basa únicamente en el máximo
-    encontrado ahí — y añade la fila con los datos del alta a
-    `registro_vacantes.xlsx`, en la misma carpeta de SharePoint que los PDFs.
-    Crea este último archivo (con cabeceras) si todavía no existe.
-
-    IMPORTANTE: debe llamarse ANTES de generar el PDF — deja el ID asignado en
-    `data["id"]` (efecto secundario sobre el dict que se le pasa) para que
-    `generar_ficha` y el nombre del archivo puedan usarlo.
-
-    Usa un archivo de bloqueo (`registro_vacantes.xlsx.lock`) para que, si dos
-    altas se envían casi a la vez DESDE ESTA APP, la segunda espere su turno en
-    vez de leer el Roadmap antes de que la primera haya podido registrar el suyo
-    (no protege frente a alguien editando el Roadmap a mano en el mismo instante).
-
-    Devuelve (id: str | None, ok: bool, mensaje: str). Nunca lanza excepción.
-    """
-    try:
-        st.secrets["SP_TENANT_ID"]; st.secrets["SP_CLIENT_ID"]; st.secrets["SP_CLIENT_SECRET"]
-    except Exception:
-        return None, False, "No se pudo generar el ID de la vacante (faltan los secretos SP_*)."
-
-    folder = _secret("SP_FOLDER_PATH", DEFAULT_FOLDER_PATH).strip("/")
-    path = "/".join(quote(seg) for seg in folder.split("/")) + "/" + quote(EXCEL_FILENAME)
-
-    try:
-        drive_id = _drive_id()
-        token = _token()
-    except Exception as e:
-        return None, False, f"No se pudo generar el ID de la vacante: {e}"
-
-    if not _adquirir_lock(drive_id, token, folder):
-        return None, False, ("No se pudo generar el ID de la vacante: otra alta lo estaba "
-                              "modificando a la vez y no quedó libre a tiempo. Inténtalo de nuevo.")
-
-    try:
-        auth = {"Authorization": f"Bearer {token}"}
-        r = requests.get(f"{GRAPH}/drives/{drive_id}/root:/{path}:/content", headers=auth, timeout=30)
-        if r.status_code == 200:
-            wb = load_workbook(io.BytesIO(r.content))
-            ws = wb.active
-        elif r.status_code == 404:
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Registro"
-            ws.append([label for _, label in COLUMNAS])
-        else:
-            r.raise_for_status()
-
-        try:
-            max_roadmap = _max_id_roadmap()
-        except Exception as e:
-            return None, False, f"No se pudo leer el Roadmap para asignar el ID: {e}"
-        numero = (max_roadmap + 1) if max_roadmap is not None else ID_INICIAL
-        prefijo = PREFIJOS_TIPO.get(data.get("tipo"), PREFIJO_DEFECTO)
-        vac_id = f"{prefijo}_{numero:03d}"
-        data["id"] = vac_id
-
-        ws.append(_fila_desde_data(data))
-
-        buf = io.BytesIO()
-        wb.save(buf)
-
-        r2 = _put_con_reintentos(
-            f"{GRAPH}/drives/{drive_id}/root:/{path}:/content",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": XLSX_MIME},
-            data=buf.getvalue(),
-        )
-        if r2.status_code == 423:
-            return None, False, ("No se pudo guardar el registro: registro_vacantes.xlsx está "
-                                  "abierto en Excel (escritorio u online) por alguien. Ciérralo e "
-                                  "inténtalo de nuevo.")
-        r2.raise_for_status()
-        return vac_id, True, "Registro actualizado en Excel ✅"
-    except Exception as e:
-        return None, False, f"No se pudo generar el ID / actualizar el Excel: {e}"
-    finally:
-        _liberar_lock(drive_id, token, folder)
-
-
-def migrar_columna_id():
-    """Migración de un solo uso para `registro_vacantes.xlsx`: reescribe la fila de
-    cabeceras con las columnas actuales (ID primero, Fecha de alta segunda, el
-    resto igual que antes) y desplaza una columna a la derecha las filas que se
-    escribieron ANTES de que existiera la columna ID (se detectan porque su
-    primera celda tiene pinta de fecha "dd/mm/aaaa hh:mm" — el antiguo valor de
-    "Fecha de alta" — en vez de un ID). Esas filas históricas se quedan con el
-    ID en blanco: no se inventa ninguno.
-
-    Idempotente: las filas que ya tengan un ID válido en la primera columna no
-    se tocan, así que se puede pulsar más de una vez sin estropear nada.
-
-    Devuelve (ok: bool, mensaje: str). Nunca lanza excepción.
-    """
-    try:
-        st.secrets["SP_TENANT_ID"]; st.secrets["SP_CLIENT_ID"]; st.secrets["SP_CLIENT_SECRET"]
-    except Exception:
-        return False, "Faltan los secretos SP_* para migrar el registro."
-
-    folder = _secret("SP_FOLDER_PATH", DEFAULT_FOLDER_PATH).strip("/")
-    path = "/".join(quote(seg) for seg in folder.split("/")) + "/" + quote(EXCEL_FILENAME)
-
-    try:
-        drive_id = _drive_id()
-        token = _token()
-    except Exception as e:
-        return False, f"No se pudo conectar con SharePoint: {e}"
-
-    if not _adquirir_lock(drive_id, token, folder):
-        return False, ("No se pudo migrar: el registro está bloqueado por otra alta ahora mismo. "
-                        "Inténtalo de nuevo en unos segundos.")
-
-    try:
-        auth = {"Authorization": f"Bearer {token}"}
-        r = requests.get(f"{GRAPH}/drives/{drive_id}/root:/{path}:/content", headers=auth, timeout=30)
-        if r.status_code == 404:
-            return True, "No existe todavía registro_vacantes.xlsx; no hay nada que migrar."
-        r.raise_for_status()
-        wb = load_workbook(io.BytesIO(r.content))
-        ws = wb.active
-
-        filas_migradas = 0
-        filas_ya_ok = 0
-        for fila in ws.iter_rows(min_row=2):
-            primera = str(fila[0].value or "")
-            if not _FECHA_ALTA_RE.match(primera):
-                filas_ya_ok += 1
-                continue  # no tiene pinta de esquema antiguo (ya migrada, con ID, o vacía): no se toca
-            valores = [c.value for c in fila]
-            for i in range(len(valores) - 1, 0, -1):
-                fila[i].value = valores[i - 1]
-            fila[0].value = None  # fila histórica: no se conoce (ni se inventa) su ID
-            filas_migradas += 1
-
-        for i, (_, label) in enumerate(COLUMNAS, start=1):
-            ws.cell(row=1, column=i, value=label)
-
-        buf = io.BytesIO()
-        wb.save(buf)
-
-        r2 = _put_con_reintentos(
-            f"{GRAPH}/drives/{drive_id}/root:/{path}:/content",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": XLSX_MIME},
-            data=buf.getvalue(),
-        )
-        if r2.status_code == 423:
-            return False, ("El registro está abierto en Excel (escritorio u online) por alguien. "
-                            "Ciérralo e inténtalo de nuevo.")
-        r2.raise_for_status()
-        return True, f"Migración completada: {filas_migradas} fila(s) desplazada(s), {filas_ya_ok} ya estaban bien."
-    except Exception as e:
-        return False, f"No se pudo migrar el registro: {e}"
-    finally:
-        _liberar_lock(drive_id, token, folder)

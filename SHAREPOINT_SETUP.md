@@ -63,5 +63,7 @@ SP_CLIENT_SECRET = "..."   # El secreto generado en el paso 2
 - Si estos secretos no están configurados, la app sigue funcionando igual que
   antes (genera el PDF y lo envía por email); simplemente se muestra un aviso
   de que no se pudo guardar en SharePoint.
-- Cada ficha se sube con el nombre `Ficha_<Empresa>_<fecha><hora>.pdf` para no
-  sobrescribir fichas anteriores de la misma empresa.
+- Cada ficha se sube con el código asignado por el CRM como nombre, p. ej.
+  `TSH_075.pdf` (ver [CRM_SETUP.md](CRM_SETUP.md)). Si por lo que sea no hay
+  código (p. ej. el CRM no está configurado), usa de respaldo
+  `Ficha_<Empresa>_<fecha><hora>.pdf` para no sobrescribir fichas anteriores.
