@@ -62,7 +62,14 @@ def _token():
         json={"email": email, "password": password},
         timeout=20,
     )
-    r.raise_for_status()
+    if r.status_code >= 400:
+        # Supabase manda el motivo real en el cuerpo (contraseña incorrecta, email sin
+        # confirmar...); sin esto solo se ve "400 Bad Request", que no dice nada.
+        try:
+            detalle = r.json().get("error_description") or r.json().get("msg") or r.text
+        except Exception:
+            detalle = r.text
+        raise RuntimeError(f"Supabase Auth rechazó el login ({r.status_code}): {detalle}")
     return r.json()["access_token"]
 
 
