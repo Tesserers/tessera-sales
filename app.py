@@ -223,6 +223,41 @@ def _smtp():
     user = st.secrets["SMTP_USER"]; pwd = st.secrets["SMTP_PASSWORD"]
     return host, port, user, pwd
 
+EDWARD_EMAIL = "edward@tesseraservices.com"
+
+def enviar_aviso_edward(data):
+    """Avisa a Edward de que hay una vacante nueva pendiente de aprobar en el CRM. Es solo
+    un aviso: no lleva ningún enlace para aceptarla o rechazarla desde el email — eso se
+    hace siempre desde dentro del propio CRM. Devuelve (ok, mensaje)."""
+    try:
+        host, port, user, pwd = _smtp()
+    except Exception:
+        return False, "No se pudo avisar a Edward (faltan los secretos SMTP)."
+    remite = st.secrets.get("SMTP_FROM", user)
+    tipo = "Headhunting" if data.get("tipo") == "headhunting" else "Outsourcing"
+    empresa = data.get("empresa", ""); titulo = data.get("titulo", "")
+    vac_id = (data.get("id") or "").strip()
+    crm_url = st.secrets.get("CRM_URL", "")
+
+    msg = EmailMessage()
+    msg["Subject"] = f"Vacante pendiente de aprobar · {vac_id + ' · ' if vac_id else ''}{empresa} · {titulo}"
+    msg["From"] = remite; msg["To"] = EDWARD_EMAIL
+    cuerpo = (f"Nueva vacante de {tipo} creada desde Tessera Sales, pendiente de tu aprobación:\n\n"
+              f"Código: {vac_id or '(sin asignar)'}\nEmpresa: {empresa}\nPuesto/servicio: {titulo}\n"
+              f"Comercial: {data.get('sales_nombre','')} ({data.get('sales_email','')})\n\n"
+              "Acéptala o recházala desde el propio CRM (pestaña Vacantes → "
+              "\"Vacantes pendientes de aprobar\").")
+    if crm_url:
+        cuerpo += f"\n\n{crm_url}"
+    msg.set_content(cuerpo)
+    try:
+        with smtplib.SMTP(host, port, timeout=30) as s:
+            s.starttls(); s.login(user, pwd)
+            s.send_message(msg)
+        return True, "Aviso enviado a Edward ✅"
+    except Exception as e:
+        return False, f"No se pudo avisar a Edward: {e}"
+
 def enviar_email(pdf_bytes, data):
     """Envía el PDF a Operaciones y una copia de las respuestas al comercial. Devuelve (ok, mensaje)."""
     try:
@@ -432,6 +467,9 @@ if st.button("Enviar información al equipo", type="primary", key="btn_enviar"):
                 vac_id, ok_crm, m_crm = crear_vacante(data)
                 if not ok_crm:
                     raise RuntimeError(m_crm)
+                # Queda pendiente de aprobación en el propio CRM (ver crear_vacante); esto
+                # solo avisa a Edward por email, no lleva ningún enlace para decidir desde ahí.
+                ok_ed, m_ed = enviar_aviso_edward(data)
                 try:
                     data["jd"] = generar_jd(data)
                 except Exception:
@@ -444,15 +482,20 @@ if st.button("Enviar información al equipo", type="primary", key="btn_enviar"):
             except Exception as e:
                 ok, m = False, f"Error generando la ficha: {e}"
                 ok_sp, m_sp = False, ""
+                ok_ed, m_ed = False, ""
         if ok:
             st.success(m)
             if not ok_sp:
                 st.warning(m_sp)
+            if not ok_ed:
+                st.warning(m_ed)
         else:
             st.error(m)
             st.info("Puedes descargar el PDF aquí abajo y enviarlo a mano mientras tanto.")
             if not ok_sp:
                 st.caption(m_sp)
+            if not ok_ed:
+                st.caption(m_ed)
 
 # descarga de respaldo (solo si ya se ha generado)
 if "ficha_pdf" in st.session_state:

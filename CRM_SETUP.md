@@ -68,3 +68,26 @@ email como hasta ahora.
   justo después para que Operaciones la reparta.
 - El sector de la empresa solo se rellena si estaba vacío (no pisa un sector
   que ya se hubiera puesto a mano en el CRM).
+
+## Aprobación de Edward
+
+Toda vacante creada desde Tessera Sales nace **pendiente de aprobación** en el
+CRM (esto requiere la parte correspondiente en `tesserahc-crm`, ver su propio
+`docs/APROBACION_VACANTES.md`): aparece en el listado con la etiqueta
+"Pendiente de aprobar", y en una sección aparte visible solo para Edward, con
+botones para aceptarla o rechazarla — **esa decisión se toma siempre dentro
+del CRM**, nunca desde el email.
+
+Justo después de crear la vacante, `app.py` le manda un aviso por email a
+`edward@tesseraservices.com` (función `enviar_aviso_edward`) con los datos
+básicos (código, empresa, puesto, comercial). Es solo un aviso: no lleva
+ningún enlace ni botón para decidir desde ahí. Si este email falla, no bloquea
+el resto del alta (el PDF y el envío a Operaciones siguen adelante igual) —
+solo se muestra un aviso.
+
+Si quieres que el email incluya un enlace directo al CRM, añade el secreto
+opcional:
+
+```toml
+# CRM_URL = "https://crm.tesseraservices.com"
+```

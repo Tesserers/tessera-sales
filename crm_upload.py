@@ -117,6 +117,8 @@ def crear_vacante(data):
         "servicio": SERVICIO_TIPO.get(data.get("tipo"), "Headhunting"),
         "ubicacion": data.get("ubicacion", ""),
         "origen": f"Alta desde Tessera Sales · {data.get('sales_nombre', '')} ({data.get('sales_email', '')})".strip(),
+        # Queda pendiente de que Edward la acepte o la rechace desde el propio CRM.
+        "aprobacion": "pendiente",
     }
     modalidad_crm = MODALIDAD_CRM.get(data.get("modalidad"))
     if modalidad_crm:
