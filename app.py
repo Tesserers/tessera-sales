@@ -276,7 +276,8 @@ def enviar_email(pdf_bytes, data):
     ops["Subject"] = f"[Alta {tipo}] {vac_id + ' · ' if vac_id else ''}{empresa} · {titulo}"
     ops["From"] = remite; ops["To"] = dest
     if data.get("sales_email"): ops["Reply-To"] = data["sales_email"]
-    ops.set_content(f"Nueva ficha de {tipo}.\n\nEmpresa: {empresa}\nPuesto/servicio: {titulo}\n"
+    ops.set_content(f"Se ha abierto una vacante nueva de {tipo}, pendiente de aceptar y asignar.\n\n"
+                    f"Código: {vac_id or '(sin asignar)'}\nEmpresa: {empresa}\nPuesto/servicio: {titulo}\n"
                     f"Comercial: {data.get('sales_nombre','')} ({data.get('sales_email','')})\n\n"
                     "Adjunto la ficha completa con la JD en PDF.")
     ops.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=fname)
